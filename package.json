@@ -1,0 +1,23 @@
+{
+  "name": "spyhunt-game-api",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.1",
+    "firebase-admin": "^14.2.0",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.4"
+  },
+  "dependencies": {
+    "gaxios": "^6.7.1",
+    "uuid": "^9.0.1"
+  }
+}
