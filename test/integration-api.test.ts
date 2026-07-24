@@ -116,10 +116,7 @@ describe('API integration handlers', () => {
       return { committed: value !== undefined, snapshot: { val: () => value } };
     });
     mockGetDatabase.mockReturnValue({
-      ref: vi.fn(() => ({
-        once: vi.fn(async () => ({ val: () => lobby })),
-        transaction
-      }))
+      ref: vi.fn(() => ({ transaction }))
     });
 
     const req = createRequest('POST', JSON.stringify({ lobbyCode: 'abc123' }));

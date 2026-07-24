@@ -6,7 +6,6 @@ interface DatabaseSnapshot {
 }
 
 interface DatabaseReference {
-  once(event: 'value'): Promise<DatabaseSnapshot>;
   transaction(update: (current: Lobby | null) => Lobby | null | undefined): Promise<{
     committed: boolean;
     snapshot?: DatabaseSnapshot;
@@ -33,14 +32,14 @@ export async function runLobbyTransaction<T>(
   let responseData: T | undefined;
   let hasResponseData = false;
 
-  // Firebase may invoke a transaction with null before the server value is
-  // locally cached. Prime the cache so existing lobbies are not rejected.
-  await reference.once('value');
-
   const result = await reference.transaction((current) => {
     const decision = decide(current);
     if (decision.kind === 'reject') {
       rejection = decision.error;
+      // Firebase may invoke the handler with null before it has loaded an
+      // existing server value. Returning null keeps the transaction alive so
+      // the server can report a conflict and retry with the actual lobby.
+      if (current === null) return null;
       return undefined;
     }
     rejection = undefined;
@@ -51,6 +50,9 @@ export async function runLobbyTransaction<T>(
 
   if (!result.committed) {
     throw rejection ?? new HttpError(409, 'TRANSACTION_CONFLICT', 'Transaction could not be completed');
+  }
+  if (rejection && !hasResponseData) {
+    throw rejection;
   }
   if (!hasResponseData) {
     throw new HttpError(500, 'INTERNAL_ERROR', 'Transaction completed without an outcome');

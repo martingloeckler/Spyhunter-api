@@ -162,9 +162,6 @@ describe('lobby transaction outcomes', () => {
   it('preserves a stable rejection instead of turning a no-op into success', async () => {
     const current = lobby();
     const reference = {
-      async once() {
-        return { val: () => current };
-      },
       async transaction(update: (current: Lobby | null) => Lobby | null | undefined) {
         const next = update(current);
         return { committed: next !== undefined, snapshot: { val: () => next } };
@@ -177,9 +174,6 @@ describe('lobby transaction outcomes', () => {
   it('returns explicit data for an intentional idempotent no-op', async () => {
     const current = lobby();
     const reference = {
-      async once() {
-        return { val: () => current };
-      },
       async transaction(update: (value: Lobby | null) => Lobby | null | undefined) {
         const next = update(current);
         return { committed: next !== undefined, snapshot: { val: () => next } };
@@ -189,25 +183,30 @@ describe('lobby transaction outcomes', () => {
       .resolves.toEqual({ idempotent: true });
   });
 
-  it('primes the Firebase cache before deciding that a lobby is missing', async () => {
+  it('keeps an initial null transaction alive until Firebase supplies the lobby', async () => {
     const current = lobby();
-    let cached: Lobby | null = null;
-    const events: string[] = [];
     const reference = {
-      async once() {
-        events.push('once');
-        cached = current;
-        return { val: () => current };
-      },
       async transaction(update: (value: Lobby | null) => Lobby | null | undefined) {
-        events.push('transaction');
-        const next = update(cached);
+        const initial = update(null);
+        expect(initial).toBeNull();
+        const next = update(current);
         return { committed: next !== undefined, snapshot: { val: () => next } };
       }
     };
     await expect(runLobbyTransaction(reference, (value) => value
       ? commitLobby(value, { source: 'final' })
       : rejectLobby(404, 'LOBBY_NOT_FOUND', 'Lobby not found'))).resolves.toEqual({ source: 'final' });
-    expect(events).toEqual(['once', 'transaction']);
+  });
+
+  it('returns the intended rejection when the lobby is actually missing', async () => {
+    const reference = {
+      async transaction(update: (value: Lobby | null) => Lobby | null | undefined) {
+        const next = update(null);
+        return { committed: true, snapshot: { val: () => next } };
+      }
+    };
+    await expect(runLobbyTransaction(reference, () =>
+      rejectLobby(404, 'LOBBY_NOT_FOUND', 'Lobby not found')))
+      .rejects.toMatchObject({ status: 404, code: 'LOBBY_NOT_FOUND' });
   });
 });
