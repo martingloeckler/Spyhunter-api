@@ -11,38 +11,54 @@ export type HttpRequest = IncomingMessage & {
 
 export type HttpHandler = (req: HttpRequest, res: ServerResponse, ctx: { requestId: string }) => Promise<void>;
 
-function readJsonBody(req: IncomingMessage): Promise<unknown> {
+export interface ApiHandlerOptions {
+  methods?: ReadonlyArray<'GET' | 'POST'>;
+}
+
+export function readJsonBody(req: IncomingMessage): Promise<unknown> {
   return new Promise((resolve, reject) => {
-    let body = '';
+    const chunks: Buffer[] = [];
     let size = 0;
+    let settled = false;
+
+    const settle = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      callback();
+    };
 
     req.on('data', (chunk: Buffer | string) => {
-      const chunkString = typeof chunk === 'string' ? chunk : chunk.toString('utf8');
-      size += Buffer.byteLength(chunkString);
+      if (settled) return;
+      const chunkBuffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, 'utf8');
+      size += chunkBuffer.byteLength;
       if (size > MAX_BODY_SIZE) {
-        reject(new HttpError(413, 'PAYLOAD_TOO_LARGE', 'Request body too large'));
+        chunks.length = 0;
+        settle(() => reject(new HttpError(413, 'PAYLOAD_TOO_LARGE', 'Request body too large')));
         return;
       }
-      body += chunkString;
+      chunks.push(chunkBuffer);
     });
 
     req.on('end', () => {
+      if (settled) return;
+      const body = Buffer.concat(chunks, size).toString('utf8');
       if (!body) {
-        resolve({});
+        settle(() => resolve({}));
         return;
       }
       try {
-        resolve(JSON.parse(body));
+        const parsed = JSON.parse(body);
+        settle(() => resolve(parsed));
       } catch {
-        reject(new HttpError(400, 'INVALID_JSON', 'Request body must be valid JSON'));
+        settle(() => reject(new HttpError(400, 'INVALID_JSON', 'Request body must be valid JSON')));
       }
     });
 
-    req.on('error', () => reject(new HttpError(400, 'INVALID_BODY', 'Could not read request body')));
+    req.on('error', () => settle(() => reject(new HttpError(400, 'INVALID_BODY', 'Could not read request body'))));
   });
 }
 
-export function createApiHandler(handler: HttpHandler) {
+export function createApiHandler(handler: HttpHandler, options: ApiHandlerOptions = {}) {
   return async function (req: IncomingMessage, res: ServerResponse): Promise<void> {
     const requestId = createRequestId();
     const request = req as HttpRequest;
@@ -51,13 +67,15 @@ export function createApiHandler(handler: HttpHandler) {
       const method = (request.method ?? 'GET').toUpperCase();
       const origin = Array.isArray(request.headers.origin) ? request.headers.origin[0] : request.headers.origin;
 
+      if (origin) appendVaryOrigin(res);
+
       if (origin && !isAllowedOrigin(origin)) {
         res.writeHead(403, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(failure('FORBIDDEN', 'Origin not allowed')));
         return;
       }
 
-      res.setHeader('Access-Control-Allow-Origin', origin ?? '*');
+      if (origin) res.setHeader('Access-Control-Allow-Origin', origin);
       res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
       res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
       res.setHeader('X-Request-Id', requestId);
@@ -68,7 +86,8 @@ export function createApiHandler(handler: HttpHandler) {
         return;
       }
 
-      if (method !== 'GET' && method !== 'POST') {
+      const allowedMethods = options.methods ?? ['GET', 'POST'];
+      if (!allowedMethods.includes(method as 'GET' | 'POST')) {
         throw new HttpError(405, 'METHOD_NOT_ALLOWED', 'Method not allowed');
       }
 
@@ -84,6 +103,15 @@ export function createApiHandler(handler: HttpHandler) {
       res.end(JSON.stringify(response));
     }
   };
+}
+
+function appendVaryOrigin(res: ServerResponse): void {
+  const current = res.getHeader?.('Vary');
+  const values = (Array.isArray(current) ? current : String(current ?? '').split(','))
+    .map((value) => String(value).trim())
+    .filter(Boolean);
+  if (!values.some((value) => value.toLowerCase() === 'origin')) values.push('Origin');
+  res.setHeader('Vary', values.join(', '));
 }
 
 function isAllowedOrigin(origin: string | string[] | undefined): boolean {
