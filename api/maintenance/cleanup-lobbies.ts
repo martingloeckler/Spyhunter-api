@@ -1,21 +1,18 @@
 import { createApiHandler } from '../../src/http.js';
 import { getDatabase } from '../../src/firebase-admin.js';
-import { authenticateRequest } from '../../src/auth.js';
+import { authenticateCronRequest } from '../../src/auth.js';
 import { loadConfig } from '../../src/config.js';
 import { success } from '../../src/responses.js';
 
 export default createApiHandler(async (req, res) => {
   const config = loadConfig();
-  const uid = await authenticateRequest(req, config.cronSecret);
-  if (uid !== 'cron') {
-    throw new Error('Unauthorized');
-  }
+  authenticateCronRequest(req, config.cronSecret);
 
   const db = getDatabase();
   const lobbiesRef = db.ref('lobbies');
-  const snapshot = await lobbiesRef.once('value');
   const now = Date.now();
   const cutoff = now - 2 * 60 * 60 * 1000;
+  const snapshot = await lobbiesRef.orderByChild('createdAt').endAt(cutoff).limitToFirst(100).once('value');
   let checked = 0;
   let deleted = 0;
 
@@ -38,4 +35,4 @@ export default createApiHandler(async (req, res) => {
 
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(success({ checked, deleted })));
-});
+}, { methods: ['GET'] });

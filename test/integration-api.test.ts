@@ -1,13 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { mockAuthenticateRequest, mockGetDatabase, mockLoadConfig } = vi.hoisted(() => ({
+const { mockAuthenticateRequest, mockAuthenticateCronRequest, mockGetDatabase, mockLoadConfig } = vi.hoisted(() => ({
   mockAuthenticateRequest: vi.fn(),
+  mockAuthenticateCronRequest: vi.fn(),
   mockGetDatabase: vi.fn(),
   mockLoadConfig: vi.fn()
 }));
 
 vi.mock('../src/auth.js', () => ({
-  authenticateRequest: mockAuthenticateRequest
+  authenticateRequest: mockAuthenticateRequest,
+  authenticateCronRequest: mockAuthenticateCronRequest
 }));
 
 vi.mock('../src/firebase-admin.js', () => ({
@@ -74,7 +76,8 @@ describe('API integration handlers', () => {
       firebasePrivateKey: 'dummy',
       firebaseDatabaseUrl: 'https://demo.firebaseio.com',
       allowedOrigins: ['http://localhost:4200'],
-      cronSecret: 'secret'
+      cronSecret: 'secret',
+      catchTokenSecret: '12345678901234567890123456789012'
     });
     mockAuthenticateRequest.mockResolvedValue('user-123');
   });
@@ -90,9 +93,27 @@ describe('API integration handlers', () => {
   });
 
   it('starts a lobby transaction with the authenticated uid', async () => {
-    const transaction = vi.fn().mockResolvedValue({
-      committed: true,
-      snapshot: { val: () => ({ gameState: 'countdown' }) }
+    const lobby = {
+      hostUid: 'user-123',
+      createdAt: Date.now(),
+      lastActivityAt: Date.now(),
+      gameState: 'lobby',
+      gameStartedAt: null,
+      gameField: { north: 51.6, south: 51.5, east: 10.2, west: 10.1 },
+      settings: {
+        gameDurationSec: 1800,
+        countdownDurationSec: 240,
+        pulseIntervalSec: 300,
+        agentInterceptEnabled: false
+      },
+      players: {
+        'user-123': { uid: 'user-123', role: 'agent', eliminated: false },
+        'user-456': { uid: 'user-456', role: null, eliminated: false }
+      }
+    };
+    const transaction = vi.fn(async (update: (current: any) => any) => {
+      const value = update(lobby);
+      return { committed: value !== undefined, snapshot: { val: () => value } };
     });
     mockGetDatabase.mockReturnValue({
       ref: vi.fn(() => ({ transaction }))
@@ -110,7 +131,6 @@ describe('API integration handlers', () => {
   });
 
   it('cleans stale lobbies and skips failures per lobby', async () => {
-    mockAuthenticateRequest.mockResolvedValue('cron');
     const remove = vi.fn().mockResolvedValue(undefined);
     const once = vi.fn()
       .mockResolvedValueOnce({
@@ -123,9 +143,17 @@ describe('API integration handlers', () => {
         val: () => ({ createdAt: 1 })
       });
 
-    mockGetDatabase.mockReturnValue({
-      ref: vi.fn(() => ({ once, remove }))
-    });
+    const query = {
+      orderByChild: vi.fn(),
+      endAt: vi.fn(),
+      limitToFirst: vi.fn(),
+      once,
+      remove
+    };
+    query.orderByChild.mockReturnValue(query);
+    query.endAt.mockReturnValue(query);
+    query.limitToFirst.mockReturnValue(query);
+    mockGetDatabase.mockReturnValue({ ref: vi.fn(() => query) });
 
     const req = createRequest('GET');
     const res = createResponse();
@@ -136,5 +164,7 @@ describe('API integration handlers', () => {
     expect(res.body).toContain('checked');
     expect(res.body).toContain('deleted');
     expect(remove).toHaveBeenCalled();
+    expect(query.orderByChild).toHaveBeenCalledWith('createdAt');
+    expect(query.limitToFirst).toHaveBeenCalledWith(100);
   });
 });

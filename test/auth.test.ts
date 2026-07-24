@@ -1,20 +1,26 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { HttpError } from '../src/errors.js';
 
-const { mockGetAuth, mockVerifyIdToken } = vi.hoisted(() => ({
+const { mockGetAuth, mockVerifyIdToken, mockGetFirebaseAdmin } = vi.hoisted(() => ({
   mockGetAuth: vi.fn(),
-  mockVerifyIdToken: vi.fn()
+  mockVerifyIdToken: vi.fn(),
+  mockGetFirebaseAdmin: vi.fn()
 }));
 
 vi.mock('firebase-admin/auth', () => ({
   getAuth: mockGetAuth
 }));
 
-import { authenticateRequest } from '../src/auth.js';
+vi.mock('../src/firebase-admin.js', () => ({
+  getFirebaseAdmin: mockGetFirebaseAdmin
+}));
+
+import { authenticateCronRequest, authenticateRequest } from '../src/auth.js';
 
 describe('authenticateRequest', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockGetFirebaseAdmin.mockReturnValue({ name: 'admin-app' });
     mockGetAuth.mockReturnValue({ verifyIdToken: mockVerifyIdToken });
   });
 
@@ -25,11 +31,19 @@ describe('authenticateRequest', () => {
     expect(mockGetAuth).not.toHaveBeenCalled();
   });
 
-  it('accepts the maintenance secret without calling Firebase Auth', async () => {
-    await expect(
-      authenticateRequest({ headers: { authorization: 'Bearer cron-secret' } }, 'cron-secret')
-    ).resolves.toBe('cron');
+  it('accepts the maintenance secret only through the cron authenticator', () => {
+    expect(() => authenticateCronRequest(
+      { headers: { authorization: 'Bearer cron-secret' } },
+      'cron-secret'
+    )).not.toThrow();
     expect(mockGetAuth).not.toHaveBeenCalled();
+  });
+
+  it('rejects a wrong maintenance secret', () => {
+    expect(() => authenticateCronRequest(
+      { headers: { authorization: 'Bearer wrong-secret' } },
+      'cron-secret'
+    )).toThrowError('Invalid maintenance token');
   });
 
   it('returns the uid from a verified Firebase token', async () => {

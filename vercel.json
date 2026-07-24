@@ -2,7 +2,7 @@
   "version": 2,
   "crons": [
     {
-      "path": "/api/cleanup-lobbies",
+      "path": "/api/maintenance/cleanup-lobbies",
       "schedule": "0 3 * * *"
     }
   ]

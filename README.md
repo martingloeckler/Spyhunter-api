@@ -1,171 +1,196 @@
 # SpyHunt Game API
 
-Diese API stellt autoritative Spielaktionen für SpyHunt auf Vercel bereit und bleibt unabhängig vom bestehenden Agora-Tokenserver.
-
-## Zweck und Abgrenzung
-
-- Bietet serverseitige Mutationen für Spielstart, Fang, Pulse, Intercept und Verlassen.
-- Verwendet Firebase Admin SDK mit der bestehenden Realtime Database.
-- Nutzt keine Firebase Cloud Functions und kein Blaze-Konto.
-- Ändert den bestehenden Agora-Tokenserver nicht.
+Autoritative Vercel API für Lobby- und Spielzugriffe von SpyHunt. App-Clients lesen und verändern Lobbydaten ausschließlich über diese API; Firebase wird clientseitig nur noch für Authentication verwendet. Der separate Agora-Tokenserver bleibt unverändert.
 
 ## Voraussetzungen
 
 - Node.js 22
 - npm
 - Firebase Realtime Database
-- Vercel Account
+- eigenes, möglichst eingeschränktes Firebase-Servicekonto
+- Vercel-Projekt für das spätere Deployment
 
-## Installation
-
-```bash
-npm install
-cp .env.example .env.local
-```
-
-## Umgebung
-
-Setze die folgenden Variablen:
-
-- FIREBASE_PROJECT_ID
-- FIREBASE_CLIENT_EMAIL
-- FIREBASE_PRIVATE_KEY
-- FIREBASE_DATABASE_URL
-- ALLOWED_ORIGINS
-- CRON_SECRET
-
-Die Datei [.env.example](.env.example) enthält nur Platzhalter.
-
-## Lokaler Start
+## Installation und Prüfung
 
 ```bash
+npm ci
 npm run build
 npm test
+npm audit --omit=dev
 ```
 
-## API
+Es gibt bewusst keinen automatischen Deployment-Befehl.
 
-### Health
+## Umgebungsvariablen
 
-GET /api/health
+```dotenv
+FIREBASE_PROJECT_ID=
+FIREBASE_CLIENT_EMAIL=
+FIREBASE_PRIVATE_KEY=
+FIREBASE_DATABASE_URL=
+ALLOWED_ORIGINS=http://localhost:4200,https://localhost,capacitor://localhost
+CRON_SECRET=
+CATCH_TOKEN_SECRET=
+```
 
-Response:
+`CATCH_TOKEN_SECRET` muss mindestens 32 UTF-8-Bytes enthalten. Es dient zur HMAC-Ableitung der Fangtokens und darf niemals an die App gelangen. Eine Rotation macht alle QR-Tokens laufender Spiele ungültig.
+
+`FIREBASE_PRIVATE_KEY` unterstützt escaped Zeilenumbrüche (`\\n`). Keine echten Secrets, ID-Tokens, Fangtokens oder GPS-Koordinaten einchecken oder loggen.
+
+Die Origin-Liste ist eine exakte Allowlist: Angular lokal verwendet `http://localhost:4200`, die Capacitor-Standardkonfiguration verwendet je nach Plattform `https://localhost` beziehungsweise `capacitor://localhost`. Wildcards sind für authentifizierte App-Requests nicht vorgesehen. Dynamische CORS-Antworten enthalten `Vary: Origin`.
+
+## Gemeinsamer HTTP-Vertrag
+
+Alle fachlichen Endpunkte verwenden `POST`, JSON und ein Firebase-ID-Token:
+
+```http
+Authorization: Bearer <Firebase-ID-Token>
+Content-Type: application/json
+```
+
+Die UID stammt ausschließlich aus `verifyIdToken()`. Unbekannte Request-Felder werden mit `400 UNKNOWN_FIELD` abgelehnt.
+
+Erfolg:
+
+```json
+{ "ok": true, "data": {} }
+```
+
+Fehler:
 
 ```json
 {
-  "ok": true,
-  "data": {
-    "service": "spyhunt-game-api"
-  }
+  "ok": false,
+  "error": { "code": "LOBBY_NOT_FOUND", "message": "Lobby not found" }
 }
 ```
 
-### Start
+Verwendete Statusklassen:
 
-POST /api/game/start
+- `400`: syntaktisch oder fachlich ungültige Eingabe
+- `401`: fehlendes oder ungültiges Firebase-ID-Token
+- `403`: fehlende Mitgliedschaft oder falsche Rolle
+- `404`: Lobby nicht gefunden
+- `409`: Zustandskonflikt
+- `429`: Positionsupdate zu schnell
+- `500`: interner Fehler ohne Firebase- oder Secret-Details
 
-Body:
+## Endpunkte
 
-```json
-{
-  "lobbyCode": "abc123"
-}
-```
+### Allgemein
 
-### Catch
+- `GET /api/health` – Healthcheck ohne Konfigurationsdetails
+- `GET /api/maintenance/cleanup-lobbies` – tägliche Bereinigung, ausschließlich mit `Bearer <CRON_SECRET>`
+- `GET /api/spyhuntgame` – kompatibler Alias des Cleanup-Handlers
 
-POST /api/game/catch
+### Lobby
 
-Body:
+- `POST /api/lobby/create`
 
 ```json
 {
   "lobbyCode": "abc123",
-  "scannedToken": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+  "gameField": { "north": 51.6, "south": 51.5, "east": 10.2, "west": 10.1 },
+  "settings": {
+    "gameDurationSec": 1800,
+    "countdownDurationSec": 240,
+    "pulseIntervalSec": 300,
+    "agentInterceptEnabled": false
+  },
+  "player": { "nickname": "Alex", "color": "#E53935" }
 }
 ```
 
-### Pulse
+- `POST /api/lobby/check` – Body `{ "lobbyCode": "abc123" }`; liefert nur Beitrittsstatus, belegte Farben und Spielerzahl
+- `POST /api/lobby/join` – Body mit `lobbyCode` und `player`; Wiederholung derselben UID ist idempotent
+- `POST /api/lobby/state` – Body `{ "lobbyCode": "abc123" }`; liefert ausschließlich die für das Mitglied freigegebene Lobby-Sicht
+- `POST /api/lobby/claim-agent` – Body `{ "lobbyCode": "abc123" }`; bei Parallelität gewinnt genau eine Transaktion
+- `POST /api/lobby/release-agent` – Body `{ "lobbyCode": "abc123" }`
 
-POST /api/game/pulse
+Erlaubte Spielerfarben:
 
-Body:
+```text
+#E53935 #1E88E5 #43A047 #FB8C00 #8E24AA #00ACC1
+```
+
+Nicknames werden getrimmt, interne Leerzeichen normalisiert und auf acht Zeichen begrenzt.
+
+### Spiel
+
+- `POST /api/game/start` – `{ "lobbyCode": "abc123" }`; ausschließlich der Host, 2–6 Spieler, genau ein Agent
+- `POST /api/game/position-session` – `{ "lobbyCode": "abc123" }`; erzeugt die einzige aktive, serverautorisierte Positionssession des Mitglieds
+- `POST /api/game/catch-token` – `{ "lobbyCode": "abc123" }`; Token nur für den aktiven Agenten, Antwort mit `Cache-Control: no-store`
+- `POST /api/game/catch` – `{ "lobbyCode": "abc123", "scannedToken": "v1.…" }`; ausschließlich aktive Jäger
+- `POST /api/game/position`
 
 ```json
 {
   "lobbyCode": "abc123",
-  "pulseIndex": 1
+  "lat": 51.55,
+  "lng": 10.15,
+  "accuracy": 8.5,
+  "sessionId": "123e4567-e89b-42d3-a456-426614174000",
+  "sequence": 12
 }
 ```
 
-### Intercept
+- `POST /api/game/heartbeat` – `{ "lobbyCode": "abc123" }`
+- `POST /api/game/pulse` – `{ "lobbyCode": "abc123", "pulseIndex": 1 }`
+- `POST /api/game/intercept` – `{ "lobbyCode": "abc123" }`
+- `POST /api/game/leave` – `{ "lobbyCode": "abc123" }`
 
-POST /api/game/intercept
+## Positions- und Presence-Vertrag
 
-Body:
+Die App liest Lobby- und Spielzustand ausschließlich über `/api/lobby/state`. Jäger erhalten dort niemals die Live-Position des Agenten. Interne `positionSessionId`- und `positionSequence`-Felder sowie unbekannte Legacy- oder Zukunftsfelder werden über eine explizite Response-Allowlist entfernt. Die einzige absichtlich sichtbare Agentenkoordinate ist `agentPulseMarker`: Sie ist ein zeitpunktgebundener, vom Agenten ausgelöster Spielmarker und keine Live-Position. Für die geschlossene Alpha pollt die App diesen Endpunkt überlappungsfrei; die Polling-Last ist vor einer öffentlichen Freigabe neu zu bewerten.
 
-```json
-{
-  "lobbyCode": "abc123"
-}
-```
+- Genauigkeit: maximal 30 Meter
+- Mindestabstand zwischen akzeptierten Positionsupdates: 1,5 Sekunden
+- maximale plausible Geschwindigkeit: 25 m/s nach Abzug beider GPS-Ungenauigkeiten
+- `sessionId`: vom Server über `/api/game/position-session` erzeugte UUID
+- `sequence`: nichtnegative, streng steigende sichere Ganzzahl
+- doppelte oder ältere Sequenzen derselben Session sind idempotente No-ops
+- die zuletzt explizit gestartete Session gewinnt; alte oder fremde Sessions erhalten `409 POSITION_SESSION_EXPIRED`
+- der Spielstart löscht vorherige Sessiondaten; jeder Client startet danach ausdrücklich eine neue Session und beginnt bei Sequenz 0
+- jede akzeptierte Position ist gleichzeitig ein Heartbeat
+- Heartbeat-Empfehlung bei Stillstand: alle 10–15 Sekunden
+- Disconnect-Markierung nach 30 Sekunden ohne Lebenszeichen
+- Eliminierung nach weiteren 60 Sekunden
+- Countdown-Radius: 5 Meter; Startpunkt wird nur bei höchstens 15 Metern Genauigkeit gesetzt
+- Feld- und Countdown-Verstoß führen nach 60 Sekunden zur serverseitigen Eliminierung
 
-### Leave
+Die App soll bei einem laufenden Positionsrequest höchstens die neueste noch nicht gesendete Position behalten.
 
-POST /api/game/leave
+## Fangtoken
 
-Body:
+`agentBleUuid` wird nicht mehr in das Lobbyobjekt geschrieben. Das Token hat das Format `v1.<base64url-hmac>` und ist an Lobby-Code, Startzeit sowie Agenten-UID gebunden. Nur der Agent lädt es über `/api/game/catch-token`; der Catch-Handler leitet den Sollwert erneut ab und verwendet einen konstantzeitgeeigneten Vergleich.
 
-```json
-{
-  "lobbyCode": "abc123"
-}
-```
+## Serverseitige Zustandsüberwachung
 
-### Maintenance
+Jede mutierende Spielaktion und jeder Heartbeat führt innerhalb der Lobby-Transaktion `reconcileLobby(now)` aus. Die Funktion behandelt Zeitablauf, fehlende Pulse, Presence, Disconnects, Verstöße, Agenteneliminierung und zu wenige aktive Spieler. Ein vorhandenes Ergebnis wird niemals überschrieben.
 
-GET /api/spyhuntgame
+`gameDurationSec` wird wie im bisherigen Client ab `gameStartedAt` gemessen und schließt den Countdown ein: Bis `countdownDurationSec` gilt `countdown`, danach `playing`, und bei `gameDurationSec` endet das Spiel.
 
-Authorization: Bearer <CRON_SECRET>
+Wenn alle Geräte offline sind, erfolgt die Entscheidung erst beim nächsten Request oder bei der täglichen Bereinigung. Diese Einschränkung ist für die geschlossene Alpha akzeptiert.
 
-## Fehlercodes
+Die Bereinigung fragt höchstens 100 Lobbys pro Lauf mit `createdAt <= cutoff` ab und prüft jeden Treffer unmittelbar vor dem Löschen erneut. Die produktiven Realtime-Database-Rules müssen für `lobbies` einen Index `".indexOn": "createdAt"` definieren; Rules werden in diesem Repository nicht verwaltet. Bei dauerhaft mehr als 100 abgelaufenen Lobbys werden weitere Einträge in späteren täglichen Läufen entfernt.
 
-- LOBBY_NOT_FOUND
-- INVALID_INPUT
-- UNAUTHORIZED
-- FORBIDDEN
-- GAME_ALREADY_STARTED
-- GAME_ALREADY_ENDED
-- INTERCEPT_ALREADY_USED
-- INVALID_STATE
+## Betriebsrisiken der Alpha
 
-## Firebase-Servicekonto
+- Ein allgemeines, verteiltes Rate-Limit für Lobby-Erstellung und sonstige Endpunkte ist noch nicht implementiert. Das Positionslimit schützt nur Positionsupdates innerhalb einer Lobby. Für die geschlossene Alpha ist das vertretbar; vor einer öffentlichen Freigabe sind Vercel Firewall/Rate Limiting oder ein zentraler, UID- und IP-basierter Limiter erforderlich.
+- Firebase Anonymous Auth liefert gültige, aber keine vertrauenswürdige Personenidentität. Automatisierte Clients können viele Konten und damit Projekt-/Auth-Quoten verbrauchen. Provider-Quoten und Monitoring sollten aktiviert, alte anonyme Konten regelmäßig bereinigt und sensible Aktionen zusätzlich begrenzt werden.
+- Firebase App Check wird derzeit nicht serverseitig verifiziert. Vor einer öffentlichen Freigabe kann der Client ein App-Check-Token mitsenden und die API es mit Firebase Admin `appCheck().verifyToken()` prüfen. Das ergänzt Auth und Rate-Limits, ersetzt sie aber nicht.
+- Cleanup ist jetzt nach `createdAt` begrenzt, bleibt aber ein Batch von maximal 100 Einträgen und ist kein sekundengenauer Lifecycle-Worker.
 
-Erstelle ein eigenes Servicekonto für dieses Projekt mit Zugriff auf die Realtime Database. Verwende nur die minimalen Rechte, die für die API erforderlich sind. Kein bestehender Service-Account des Agora-Tokenservers.
+## Rollout und Firebase Rules
 
-## Vercel-Umgebungsvariablen
+Noch keine produktiven Rules ändern, solange eine veröffentlichte Angular-App direkte Firebase-Zugriffe enthält. Sichere Reihenfolge:
 
-Lege in Vercel die gleichen Variablen wie in der lokalen .env-Datei an. Achte darauf, dass FIREBASE_PRIVATE_KEY die Zeilenumbrüche korrekt escaped enthält.
+1. API lokal und später in einer freigegebenen Umgebung bereitstellen.
+2. Angular-App vollständig auf diese Endpunkte migrieren.
+3. Mehrgeräte-, Reconnect- und Race-Condition-Tests durchführen.
+4. Nachweisen, dass keine direkten Client-Lese- oder Schreibzugriffe verbleiben.
+5. Erst dann die Lobby-Rules für Clients auf `.read: false` und `.write: false` setzen und mit dem Rules Emulator testen.
 
-## Cron-Job
+Alte App-Versionen dürfen ab Beginn der Umstellung keine neuen Legacy-Lobbys mehr erstellen. Für die Alpha werden bestehende Lobbys vor dem App-Update ausgelaufen beziehungsweise gelöscht; eine gemischte V1/V2-Lobby wird nicht migriert. Ein Deployment erfolgt ausschließlich nach ausdrücklicher Freigabe.
 
-Der tägliche Cron-Job läuft in UTC zu 03:00 Uhr. Lobbys bleiben eventuell bis zu etwa 24 Stunden länger erhalten, weil Vercel Hobby-Cron nur grob geplant wird.
-
-## Sicherheitsannahmen und Alpha-Einschränkungen
-
-- Keine echten Secrets im Repository.
-- Keine vollständige Migration aller direkten Client-Schreibrechte.
-- Die Puls-Validierung verwendet ein Frischefenster von 60 Sekunden.
-- Die API validiert Serverzeit und Token-Identität selbst.
-
-## Abhängigkeits-Upgrade-Roadmap
-
-Eine detaillierte Roadmap für zukünftige Abhängigkeits-Upgrades ist in [docs/upgrade-roadmap.md](docs/upgrade-roadmap.md) beschrieben.
-
-## Angular-Integration
-
-1. API lokal bauen und testen.
-2. Neues Vercel-Projekt mit eigenen Secrets anlegen.
-3. Angular um einen gameApiUrl-Parameter ergänzen.
-4. Firebase Bearer-Token an die API übergeben.
-5. Aktionen einzeln migrieren: Start → Catch → Pulse → Intercept → Leave.
+Details für das App-System stehen in [docs/api-v2-client-handoff.md](docs/api-v2-client-handoff.md). Die vollständige Anforderung befindet sich in [docs/Specs/anforderung-vercel-game-api-v2-keine-client-schreibzugriffe.md](docs/Specs/anforderung-vercel-game-api-v2-keine-client-schreibzugriffe.md).
