@@ -6,6 +6,7 @@ interface DatabaseSnapshot {
 }
 
 interface DatabaseReference {
+  once(event: 'value'): Promise<DatabaseSnapshot>;
   transaction(update: (current: Lobby | null) => Lobby | null | undefined): Promise<{
     committed: boolean;
     snapshot?: DatabaseSnapshot;
@@ -31,6 +32,10 @@ export async function runLobbyTransaction<T>(
   let rejection: HttpError | undefined;
   let responseData: T | undefined;
   let hasResponseData = false;
+
+  // Firebase may invoke a transaction with null before the server value is
+  // locally cached. Prime the cache so existing lobbies are not rejected.
+  await reference.once('value');
 
   const result = await reference.transaction((current) => {
     const decision = decide(current);

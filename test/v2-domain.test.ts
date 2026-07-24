@@ -160,9 +160,13 @@ describe('reconcileLobby', () => {
 
 describe('lobby transaction outcomes', () => {
   it('preserves a stable rejection instead of turning a no-op into success', async () => {
+    const current = lobby();
     const reference = {
+      async once() {
+        return { val: () => current };
+      },
       async transaction(update: (current: Lobby | null) => Lobby | null | undefined) {
-        const next = update(lobby());
+        const next = update(current);
         return { committed: next !== undefined, snapshot: { val: () => next } };
       }
     };
@@ -173,6 +177,9 @@ describe('lobby transaction outcomes', () => {
   it('returns explicit data for an intentional idempotent no-op', async () => {
     const current = lobby();
     const reference = {
+      async once() {
+        return { val: () => current };
+      },
       async transaction(update: (value: Lobby | null) => Lobby | null | undefined) {
         const next = update(current);
         return { committed: next !== undefined, snapshot: { val: () => next } };
@@ -182,20 +189,25 @@ describe('lobby transaction outcomes', () => {
       .resolves.toEqual({ idempotent: true });
   });
 
-  it('uses the outcome from the final Firebase transaction retry', async () => {
+  it('primes the Firebase cache before deciding that a lobby is missing', async () => {
     const current = lobby();
-    let attempts = 0;
+    let cached: Lobby | null = null;
+    const events: string[] = [];
     const reference = {
+      async once() {
+        events.push('once');
+        cached = current;
+        return { val: () => current };
+      },
       async transaction(update: (value: Lobby | null) => Lobby | null | undefined) {
-        attempts += 1;
-        update(null);
-        const next = update(current);
+        events.push('transaction');
+        const next = update(cached);
         return { committed: next !== undefined, snapshot: { val: () => next } };
       }
     };
     await expect(runLobbyTransaction(reference, (value) => value
       ? commitLobby(value, { source: 'final' })
       : rejectLobby(404, 'LOBBY_NOT_FOUND', 'Lobby not found'))).resolves.toEqual({ source: 'final' });
-    expect(attempts).toBe(1);
+    expect(events).toEqual(['once', 'transaction']);
   });
 });
